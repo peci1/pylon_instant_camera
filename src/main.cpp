@@ -1,3 +1,6 @@
+#include <chrono>
+#include <thread>
+
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <image_transport/image_transport.hpp>
@@ -45,7 +48,6 @@ public:
     Pylon::CBaslerUniversalInstantCamera * camera;
     int grab_timeout_ms = 1000;
     PylonCamera(const std::string & full_name, const std::string & user_defined_name, const std::string & ip_address, const int serial_number) {
-        Pylon::PylonInitialize();
         // Create an instant camera object with the camera device found first or found by specified parameters.
         if (!full_name.empty() && !user_defined_name.empty() && !ip_address.empty() && serial_number == 0) {
             camera = new Pylon::CBaslerUniversalInstantCamera(Pylon::CTlFactory::GetInstance().CreateFirstDevice());
@@ -74,7 +76,6 @@ public:
     }
     ~PylonCamera() {
         delete camera;
-        Pylon::PylonTerminate(); 
     }
     Pylon::CGrabResultPtr & grab_frame() {
         if (camera->IsGrabbing()) {
@@ -129,16 +130,27 @@ public:
         ip_address = this->declare_parameter("ip_address", ip_address);
         serial_number = this->declare_parameter("serial_number", serial_number);
 
+        Pylon::PylonInitialize();
+
         RCLCPP_INFO(
             this->get_logger(), 
             "Constructing camera object for full name [%s], user defined name [%s], IP address [%s], serial number [%d].", 
             full_name.c_str(), user_defined_name.c_str(), ip_address.c_str(), serial_number
         );
-        try {
-            camera = std::make_unique<PylonCamera>(full_name, user_defined_name, ip_address, serial_number);
-        } catch (const GenICam::RuntimeException & e) {
-            RCLCPP_ERROR(get_logger(), "Exception in PylonCamera constructor: %s", e.what());
-            throw e;
+        while (rclcpp::ok()) {
+            try {
+                camera = std::make_unique<PylonCamera>(full_name, user_defined_name, ip_address, serial_number);
+                break;
+            } catch (const std::exception & e) {
+                RCLCPP_ERROR(get_logger(), "Exception in PylonCamera constructor: %s", e.what());
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            } catch (const Pylon::GenericException & e) {
+                RCLCPP_ERROR(get_logger(), "Pylon exception in PylonCamera constructor: %s", e.what());
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        }
+        if (!camera) {
+            throw std::runtime_error("Failed to construct camera object");
         }
 
         // camera parameters
@@ -206,6 +218,9 @@ public:
                 }
             }
         });
+    }
+    ~PylonCameraNode() {
+        Pylon::PylonTerminate();
     }
     void grab_and_publish() {
         sensor_msgs::msg::Image * img_msg = pylon_result_to_image_message(camera->grab_frame());
